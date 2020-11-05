@@ -1,0 +1,632 @@
+from copy import copy
+from collections import defaultdict
+
+
+
+class Peak:
+    def __init__(
+            self,
+            mz_array,
+            intensity,
+            scan_id,
+            start_id,
+            ion_mobility_array):
+
+        self.mz_array = copy(mz_array)
+        self.scan_id = [[scan_id, ] for _ in range(len(mz_array))]
+        self.intensity = [[i, ] for i in intensity]
+        if not (ion_mobility_array is None):
+
+            self.ion_mobility = [[i, ] for i in ion_mobility_array]
+        else:
+            self.ion_mobility = None
+        self.mass_array = [[i, ] for i in mz_array]
+        self.finished_hills = []
+        self.crosslinked_hills = []
+        self.intervals = [start_id, ]
+        self.actual_degree = 0
+        self.medar = [1.0, ]
+
+    def get_potential_isotope_id(self, i_fast, i_idx):
+        tmp = self.finished_hills_fast_dict.get(i_fast, [])
+        # tmp.remove(i_idx)
+        return tmp
+
+    def recalc_fast_array_for_finished_hills(self):
+        m_koef = 0.02
+        im_koef = 0.02
+        self.finished_hills_fast_array = [int(fh.mz / m_koef) for fh in self.finished_hills]
+        self.finished_hills_fast_dict = defaultdict(set)
+        for idx, fm in enumerate(self.finished_hills_fast_array):
+            self.finished_hills_fast_dict[fm - 1].add(idx)
+            self.finished_hills_fast_dict[fm + 1].add(idx)
+            self.finished_hills_fast_dict[fm].add(idx)
+
+    def recalc_fast_array(self):
+        m_koef = 0.02
+        im_koef = 0.02
+        # self.fast_array = [int(tm/m_koef) for tm in self.mz_array]
+        self.fast_array = (self.mz_array / m_koef).astype(int)
+        self.fast_dict = defaultdict(set)
+        for idx, fm in enumerate(self.fast_array):
+            self.fast_dict[fm - 1].add(idx)
+            self.fast_dict[fm + 1].add(idx)
+            self.fast_dict[fm].add(idx)
+
+    def concat_peak_with(self, second_peak):
+
+        self.mz_array = self.mz_array + second_peak.mz_array
+        self.intensity = self.intensity + second_peak.intensity
+        if not (self.ion_mobility is None):
+            self.ion_mobility = self.ion_mobility + second_peak.ion_mobility
+        self.mass_array = self.mass_array + second_peak.mass_array
+        self.finished_hills = self.finished_hills + second_peak.finished_hills
+        self.crosslinked_hills = self.crosslinked_hills + \
+                                 second_peak.crosslinked_hills
+        self.intervals = self.intervals + second_peak.intervals
+
+    def crosslink_simple(self, mass_accuracy):
+
+        crosslink_counter = 0
+        self.finished_hills = sorted(
+            self.finished_hills,
+            key=lambda x: x.scan_id[0])
+
+        allowed_ids = set()
+        for i in self.intervals:
+            allowed_ids.add(i - 1)
+            allowed_ids.add(i - 2)
+
+        allowed_ids2 = set()
+        for i in self.intervals:
+            allowed_ids2.add(i)
+            allowed_ids2.add(i + 1)
+
+        map_ids_1 = defaultdict(list)
+        map_ids_2 = defaultdict(set)
+
+        self.finished_hills_fast_dict = defaultdict(set)
+        m_koef = 0.02
+
+        for i, hill in enumerate(self.finished_hills):
+
+            end_scan = hill.scan_id[-1]
+            if end_scan in allowed_ids:
+                map_ids_1[end_scan].append(i)
+                fm = int(hill.mz / m_koef)
+                self.finished_hills_fast_dict[fm - 1].add(i)
+                self.finished_hills_fast_dict[fm + 1].add(i)
+                self.finished_hills_fast_dict[fm].add(i)
+
+            start_scan = hill.scan_id[0]
+            if start_scan in allowed_ids2:
+                map_ids_2[start_scan].add(i)
+                fm = int(hill.mz / m_koef)
+                self.finished_hills_fast_dict[fm - 1].add(i)
+                self.finished_hills_fast_dict[fm + 1].add(i)
+                self.finished_hills_fast_dict[fm].add(i)
+
+        banned_ids = set()
+        way_to_combine = []
+
+        for al_id in sorted(allowed_ids):
+
+            for i in map_ids_1[al_id]:
+
+                if i not in banned_ids:
+
+                    hill = self.finished_hills[i]
+                    fm = int(hill.mz / m_koef)
+                    for j in self.finished_hills_fast_dict[fm]:
+
+                        if (j in map_ids_2[al_id + 1] or j in map_ids_2[al_id + 2]) and j not in banned_ids:
+
+                            hill2 = self.finished_hills[j]
+                            if abs(hill.mz - hill2.mz) / \
+                                    hill.mz <= mass_accuracy * 1e-6:
+                                banned_ids.add(i)
+                                banned_ids.add(j)
+                                way_to_combine.append((i, j))
+
+        for i, j in way_to_combine[::-1]:
+            self.finished_hills[i] = ready_hill(
+                intensity=hill.intensity +
+                          hill2.intensity,
+                scan_id=hill.scan_id +
+                        hill2.scan_id,
+                mass=hill.mass +
+                     hill2.mass,
+                ion_mobility=(
+                    hill.ion_mobility +
+                    hill2.ion_mobility
+                    if not (hill.ion_mobility is None)
+                    else None))
+            del self.finished_hills[j]
+
+        for i in list(range(len(self.finished_hills)))[::-1]:
+            if len(self.finished_hills[i].scan_id) < 3:
+                del self.finished_hills[i]
+
+    def crosslink(self, mass_accuracy):
+
+        crosslink_counter = 0
+        # crosslink_counter2 = 0
+        self.finished_hills = sorted(
+            self.finished_hills,
+            key=lambda x: x.scan_id[0])
+
+        i = 0
+        ini_len = len(self.finished_hills)
+
+        while i < ini_len:
+
+            hill = self.finished_hills[i]
+            j = i + 1
+
+            while j < ini_len:
+
+                hill2 = self.finished_hills[j]
+
+                # if hill.scan_id[-1] == hill2.scan_id[0]:
+                if abs(hill.scan_id[-1] - hill2.scan_id[0]) <= 1:
+                    # crosslink_counter2 += 1
+                    if abs(hill.mz - hill2.mz) / \
+                            hill.mz <= mass_accuracy * 1e-6:
+                        self.finished_hills[i] = ready_hill(
+                            intensity=hill.intensity + hill2.intensity,
+                            scan_id=hill.scan_id + hill2.scan_id,
+                            mass=hill.mass + hill2.mass,
+                            ion_mobility=hill.ion_mobility +
+                                         hill2.ion_mobility)
+                        del self.finished_hills[j]
+                        ini_len -= 1
+                        crosslink_counter += 1
+                elif hill2.scan_id[0] > hill.scan_id[-1] + 1:
+                    break
+
+                j += 1
+
+            i += 1
+
+        # print(crosslink_counter)
+        # print(crosslink_counter2)
+
+    def sort_finished_hills(self):
+        self.finished_hills = sorted(self.finished_hills, key=lambda x: x.mz)
+
+    def check_its_ready(self, id_real, check_degree, min_length):
+
+        mask_to_del = [True] * self.mz_array.size
+        for i in range(self.mz_array.size)[::-1]:
+
+            # degree_actual = id_real - self.scan_id[i][0] - len(self.scan_id[i]) + 1
+            degree_actual = id_real - self.scan_id[i][-1]
+            # or (degree_actual == 2 and len(self.scan_id[i]) == 1):
+            if degree_actual > check_degree:
+
+                # degree_actual = id_real - self.scan_id[i][-1]
+                # if degree_actual > check_degree or (degree_actual == 2 and
+                # len(self.scan_id[i]) <= 3):
+
+                list_intensity = self.intensity.pop(i)
+                if not (self.ion_mobility is None):
+                    list_ion_mobility = self.ion_mobility.pop(i)
+                else:
+                    list_ion_mobility = None
+                list_scan_id = self.scan_id.pop(i)
+                list_mass = self.mass_array.pop(i)
+                lsi = len(list_scan_id)
+                if lsi >= min_length:
+                    tmp_ready_hill = ready_hill(intensity=list_intensity,
+                                                scan_id=list_scan_id,
+                                                mass=list_mass,
+                                                ion_mobility=list_ion_mobility,
+                                                )
+                    self.finished_hills.append(tmp_ready_hill)
+
+                mask_to_del[i] = False
+
+                # if len(tmp_ready_hill.scan_id) >= min_length:
+                #     self.finished_hills.append(tmp_ready_hill)
+
+        self.mz_array = self.mz_array[mask_to_del]
+
+    def push_left(self, min_length):
+        mask_to_del = [True] * self.mz_array.size
+        for i in range(self.mz_array.size)[::-1]:
+
+            tmp_ready_hill = ready_hill(
+                intensity=self.intensity.pop(i),
+                scan_id=self.scan_id.pop(i),
+                mass=self.mass_array.pop(i),
+                ion_mobility=(
+                    self.ion_mobility.pop(i) if not (
+                            self.ion_mobility is None) else None),
+            )
+            mask_to_del[i] = False
+
+            if len(tmp_ready_hill.scan_id) >= min_length:
+                self.finished_hills.append(tmp_ready_hill)
+
+        self.mz_array = self.mz_array[mask_to_del]
+
+        # self.medar.append(1.0)
+
+    def get_nearest_value(self, value, mask):
+        return np.argmin(np.abs(self.mz_array[mask] - value))
+
+    def newid(self, nearest, mask):
+        return np.nonzero(mask)[0][nearest]
+
+    def get_potential_nearest(self, i_fast):
+        return self.fast_dict.get(i_fast, None)
+
+    def get_nearest_id(self, i, prev_nearest, diff, mz_array_l, ion_mobility, mask):
+        mass_diff = diff * 1e-6 * i
+        best_diff = 2 * mass_diff
+        best_id = False
+        cur_md_abs = 0
+        best_prev_nearest_id = False
+
+        i_fast = int(i / 0.02)
+
+        set_idx = self.get_potential_nearest(i_fast)
+
+        if set_idx:
+            for nearest_id in set_idx:
+                if mask[nearest_id]:
+                    # nearest_id = prev_nearest
+                    # while nearest_id < mz_array_l:
+                    cur_md = self.mz_array[nearest_id] - i
+                    cur_md_abs = abs(cur_md)
+                    if cur_md_abs <= mass_diff:
+                        if not best_prev_nearest_id:
+                            best_prev_nearest_id = int(nearest_id)
+                        if (ion_mobility is None) or \
+                                abs(ion_mobility -
+                                    self.ion_mobility[nearest_id][-1]) <= 0.1:
+                            if cur_md_abs <= best_diff:
+                                best_diff = float(cur_md_abs)
+                                best_id = int(nearest_id)
+                        # prev_nearest = int(nearest_id)
+                # elif cur_md > mass_diff:
+                #     break
+
+                # nearest_id += 1
+        if not best_prev_nearest_id:
+            best_prev_nearest_id = prev_nearest
+        return best_id, best_diff / i, best_prev_nearest_id
+
+    def get_arrays(self, tmp1):
+        tmp1_nearest_id_arr = np.array([x[0] for x in tmp1])
+        tmp1_idx_arr = np.array([x[1] for x in tmp1])
+        tmp1_diff_arr = np.array([x[2] for x in tmp1])
+        return tmp1_nearest_id_arr, tmp1_idx_arr, tmp1_diff_arr
+
+    def push_me_to_the_peak(self, next_peak, diff, min_length):
+
+        next_mz_array = next_peak.next_mz_array
+        next_intensity_array = next_peak.next_intensity_array
+        next_ion_mobility_array = next_peak.next_ion_mobility_array
+        next_scan_id = next_peak.next_scan_id
+
+        self.check_its_ready(
+            id_real=next_scan_id,
+            check_degree=2,
+            min_length=min_length)
+
+        mask = [True] * (len(self.mz_array))
+        tmp1 = []
+        tmp2 = []
+
+        prev_nearest = 0
+
+        self.recalc_fast_array()
+        # self.recalc_fast_array()
+
+        mask = [True] * (len(self.mz_array))
+
+        mz_array_l = len(self.mz_array)
+        for idx, i in enumerate(next_mz_array):
+            best_id, \
+            md_res, \
+            prev_nearest = self.get_nearest_id(
+                i,
+                prev_nearest,
+                diff,
+                mz_array_l,
+                (next_ion_mobility_array[idx]
+                 if not (
+                        next_ion_mobility_array is None)
+                 else None), mask)
+            if best_id:
+                tmp1.append([best_id, idx, md_res])
+
+        tmp1_nearest_id_arr, tmp1_idx_arr, tmp1_diff_arr = self.get_arrays(
+            tmp1)
+
+        sort_list = np.argsort(tmp1_diff_arr)  # try different kinds
+        tmp1_nearest_id_arr = tmp1_nearest_id_arr[sort_list]
+        tmp1_idx_arr = tmp1_idx_arr[sort_list]
+        tmp1_diff_arr = tmp1_diff_arr[sort_list]
+
+        saved_index = set()
+
+        while tmp1:
+
+            # tmp_id = tmp1_idx_arr[0]
+
+            if tmp1_diff_arr.size == 0:
+                break
+
+            if tmp1_diff_arr[0] > diff * 1e-6:
+                break
+
+            tmp2.append((tmp1_nearest_id_arr[0], tmp1_idx_arr[0]))
+
+            saved_index.add(tmp1_idx_arr[0])
+
+            mask[tmp2[-1][0]] = False
+            if any(mask):
+                tmp1_nearest_id_arr = tmp1_nearest_id_arr[1:]
+
+                tmp1_idx_arr = tmp1_idx_arr[1:]
+
+                tmp1_diff_arr = tmp1_diff_arr[1:]
+
+                if tmp1_diff_arr.size == 0:
+                    break
+
+                if tmp1_nearest_id_arr[0] in saved_index:
+
+                    for idx, element in enumerate(tmp1_idx_arr):
+
+                        if tmp1_nearest_id_arr[idx] in saved_index:
+
+                            element_mz = next_mz_array[element]
+                            element_im = (next_ion_mobility_array[element]
+                                          if not (
+                                    next_ion_mobility_array is None)
+                                          else None)
+
+                            # nearest = self.get_nearest_value(element_mz, mask)
+                            # nearest_id_old = self.newid(nearest, mask)
+
+                            nearest_id, \
+                            md_res, \
+                            prev_nearest = self.get_nearest_id(
+                                element_mz,
+                                0,
+                                diff,
+                                0,
+                                element_im, mask)
+
+                            # if nearest_id_old != nearest_id:
+                            #     print('WTF', nearest_id_old, nearest_id)
+
+                            if not nearest_id:
+                                nearest_id = 0
+                                md_res = 1e6
+                            # else:
+                            #     if nearest_id_old != nearest_id:
+                            #         md_old = abs((self.mz_array[nearest_id] - element_mz) / element_mz)
+                            #         print('WTF', nearest_id_old, nearest_id, md_old, md_res)
+
+                            tmp1_nearest_id_arr[idx] = nearest_id
+
+                            tmp1_diff_arr[idx] = md_res
+                        else:
+                            break
+                    sort_list = np.argsort(
+                        tmp1_diff_arr, kind='quicksort')  # try different kinds
+                    tmp1_nearest_id_arr = tmp1_nearest_id_arr[sort_list]
+                    tmp1_idx_arr = tmp1_idx_arr[sort_list]
+                    tmp1_diff_arr = tmp1_diff_arr[sort_list]
+
+            else:
+                break
+
+        for i, idx in tmp2:
+            # FIXME
+            # self.mz_array[i] = (self.mz_array[i] + next_mz_array[idx])/2
+            self.scan_id[i].append(next_scan_id)
+            self.intensity[i].append(next_intensity_array[idx])
+            if not (self.ion_mobility is None):
+                self.ion_mobility[i].append(next_ion_mobility_array[idx])
+            self.mass_array[i].append(next_mz_array[idx])
+            tmp_mass_array = self.mass_array[i][-3:]
+            self.mz_array[i] = sum(tmp_mass_array) / len(tmp_mass_array)
+            # self.mz_array[i] = np.average(self.mass_array[i][-3:], weights=self.intensity[i][-3:])
+
+        added = set(x[1] for x in tmp2)
+        mask2 = [(False if i in added else True)
+                 for i in range(len(next_mz_array))]
+        next_mz_array_size = next_mz_array[mask2].size
+        self.mz_array = np.append(self.mz_array, next_mz_array[mask2])
+        # self.recalc_fast_array()
+
+        n_i_a_m = next_intensity_array[mask2]
+        if not (self.ion_mobility is None):
+            n_im_a_m = next_ion_mobility_array[mask2]
+        n_m_a_m = next_mz_array[mask2]
+        for i in range(next_mz_array_size):
+            self.scan_id.append([next_scan_id, ])
+            self.intensity.append([n_i_a_m[i], ])
+            if not (self.ion_mobility is None):
+                self.ion_mobility.append([n_im_a_m[i], ])
+            self.mass_array.append([n_m_a_m[i], ])
+
+        self.selfsort()
+
+    def selfsort(self):
+        idx = np.argsort(self.mz_array)
+        self.mz_array = self.mz_array[idx]
+        self.scan_id = [self.scan_id[i] for i in idx]
+        self.intensity = [self.intensity[i] for i in idx]
+        if not (self.ion_mobility is None):
+            self.ion_mobility = [self.ion_mobility[i] for i in idx]
+        self.mass_array = [self.mass_array[i] for i in idx]
+
+    def cutting_down(self, intensity_propotion):
+
+        for idx, peak in enumerate(self.finished_hills):
+
+            max_intensity_propotion = peak.max_intensity * intensity_propotion
+            # FIXME try "and"
+
+            if (
+                    peak.intensity[0] >= max_intensity_propotion and
+                    peak.intensity[-1] >= max_intensity_propotion):
+                del self.finished_hills[idx]
+
+    def split_peaks2(self, hillValleyFactor):
+
+        set_to_del = set()
+        new_hills = []
+        for hill_idx, hill in enumerate(self.finished_hills):
+
+            if len(hill.mass) >= 6:
+
+                mz_diff = np.array([z - hill.mz for z in hill.mass])
+                std_5 = np.std(np.diff(mz_diff))
+                smothed_intensity = list(np.abs(np.diff(mz_diff)) / std_5)
+
+                c_len = len(smothed_intensity) - 3
+                idx = 3
+                min_idx_list = []
+                min_val = 1.0
+                while idx <= c_len:
+                    mult_val = smothed_intensity[idx]
+                    if mult_val >= hillValleyFactor:
+                        # if not len(min_idx_list) or idx >= min_idx_list[-1] + 3:
+                        #     min_idx_list.append(idx)
+                        #     min_val = mult_val
+                        # elif mult_val < min_val:
+                        #     min_idx_list[-1] = idx
+                        #     min_val = mult_val
+                        if (not len(min_idx_list) or idx >= min_idx_list[-1] + 3) and max(
+                                hill.intensity[0:idx - 1]) >= 1.5 * max(hill.intensity[0],
+                                                                        hill.intensity[idx - 1]) and max(
+                                hill.intensity[idx:]) >= 1.5 * max(hill.intensity[idx], hill.intensity[-1]):
+                            min_idx_list.append(idx)
+                            min_val = mult_val
+                        elif (mult_val < min_val) and max(hill.intensity[0:idx - 1]) >= 1.5 * max(hill.intensity[0],
+                                                                                                  hill.intensity[
+                                                                                                      idx - 1]) and max(
+                                hill.intensity[idx:]) >= 1.5 * max(hill.intensity[idx], hill.intensity[-1]):
+                            min_idx_list[-1] = idx
+                            min_val = mult_val
+                    idx += 1
+
+                if len(min_idx_list):
+                    set_to_del.add(hill_idx)
+                    prev_idx = 1
+                    for min_idx in min_idx_list:
+                        new_hills.append(ready_hill(
+                            intensity=hill.intensity[prev_idx - 1:min_idx],
+                            scan_id=hill.scan_id[prev_idx - 1:min_idx],
+                            mass=hill.mass[prev_idx - 1:min_idx],
+                            ion_mobility=(
+                                hill.ion_mobility[prev_idx - 1:min_idx] if not
+                                (hill.ion_mobility is None) else
+                                None)))
+                        prev_idx = min_idx
+
+                    new_hills.append(ready_hill(
+                        intensity=hill.intensity[min_idx - 1:],
+                        scan_id=hill.scan_id[min_idx - 1:],
+                        mass=hill.mass[min_idx - 1:],
+                        ion_mobility=(
+                            hill.ion_mobility[min_idx - 1:] if not
+                            (hill.ion_mobility is None) else
+                            None)))
+        # print(len(new_hills))
+        # print(len(set_to_del))
+
+        print(len(self.finished_hills))
+
+        for idx in sorted(list(set_to_del))[::-1]:
+            del self.finished_hills[idx]
+
+        print(len(self.finished_hills))
+        self.finished_hills.extend(new_hills)
+
+        print(len(self.finished_hills))
+
+    def split_peaks(self, hillValleyFactor):
+        set_to_del = set()
+        new_hills = []
+        for hill_idx, hill in enumerate(self.finished_hills):
+            # smothed_intensity = hill.intensity
+
+            smothed_intensity = meanfilt(hill.intensity, 3)
+
+            # smothed_intensity = medfilt(smothed_intensity, 3)
+
+            # smothed_intensity = medfilt(hill.intensity, 3)
+            # smothed_intensity = meanfilt(smothed_intensity, 3)
+
+            c_len = len(smothed_intensity) - 3
+            idx = 3
+            # min_idx = False
+            min_idx_list = []
+            min_val = 0
+            l_idx = 0
+            while idx <= c_len:
+
+                if len(min_idx_list) and idx >= min_idx_list[-1] + 3:
+                    l_idx = min_idx_list[-1]
+
+                l_r = max(smothed_intensity[l_idx:idx]) / float(smothed_intensity[idx])
+
+                r_r = max(smothed_intensity[idx:]) / float(smothed_intensity[idx])
+
+                #     print(l_r, r_r)
+                if l_r >= hillValleyFactor and r_r >= hillValleyFactor:
+                    mult_val = l_r * r_r
+                    # if mult_val < min_val:
+                    #     min_val = mult_val
+                    if not len(min_idx_list) or idx >= min_idx_list[-1] + 3:
+                        min_idx_list.append(idx)
+                        min_val = mult_val
+                    elif mult_val > min_val:
+                        min_idx_list[-1] = idx
+                        min_val = mult_val
+                        # min_idx = idx
+                idx += 1
+            if len(min_idx_list):
+                set_to_del.add(hill_idx)
+                prev_idx = 0
+                for min_idx in min_idx_list:
+                    new_hills.append(ready_hill(
+                        intensity=hill.intensity[prev_idx:min_idx],
+                        scan_id=hill.scan_id[prev_idx:min_idx],
+                        mass=hill.mass[prev_idx:min_idx],
+                        ion_mobility=(
+                            hill.ion_mobility[prev_idx:min_idx] if not
+                            (hill.ion_mobility is None) else
+                            None)))
+                    prev_idx = min_idx
+
+                new_hills.append(ready_hill(
+                    intensity=hill.intensity[min_idx:],
+                    scan_id=hill.scan_id[min_idx:],
+                    mass=hill.mass[min_idx:],
+                    ion_mobility=(
+                        hill.ion_mobility[min_idx:] if not
+                        (hill.ion_mobility is None) else
+                        None)))
+        # print(len(new_hills))
+        # print(len(set_to_del))
+
+        print(len(self.finished_hills))
+
+        for idx in sorted(list(set_to_del))[::-1]:
+            del self.finished_hills[idx]
+
+        print(len(self.finished_hills))
+        self.finished_hills.extend(new_hills)
+
+        print(len(self.finished_hills))
+
+    # self.finished_hills = result
